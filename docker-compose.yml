@@ -70,7 +70,7 @@ services:
 
   mongo:
     <<: *hardening
-    image: mongo:8.0
+    image: mongo:9.0
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Defina MONGO_ROOT_PASSWORD no .env}
