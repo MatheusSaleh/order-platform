@@ -1,0 +1,173 @@
+# Plataforma de pedidos - configuracao SEGURA POR PADRAO.
+#
+#   - Nenhum banco, broker ou servico interno publica porta no host.
+#     (O Docker ignora o firewall UFW para portas publicadas, entao nada e exposto sem necessidade.)
+#   - So o front-end publica porta, por padrao apenas em 127.0.0.1.
+#   - Senhas obrigatorias via .env (gere com ./scripts/generate-env.sh).
+#   - Rede "backend" interna: os containers internos nao tem acesso a internet.
+#   - Containers sem privilegios extras, com limite de memoria e rotacao de logs.
+#
+# Os repositorios dos servicos devem estar clonados lado a lado com este (veja o README).
+#
+#   Local:               docker compose up --build                          -> http://localhost:3000
+#   Debug (portas):      docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#   VPS com HTTPS:       docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+
+name: order-platform
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-java-service: &java-service
+  <<: *hardening
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  networks:
+    - backend
+  deploy:
+    resources:
+      limits:
+        memory: 512M
+
+x-rabbit-env: &rabbit-env
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-orders}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?Defina RABBITMQ_PASSWORD no .env - rode ./scripts/generate-env.sh}
+  ORDER_QUEUE: pedidos_fila
+
+x-mongo-uri: &mongo-uri mongodb://${MONGO_APP_USER:-orders_app}:${MONGO_APP_PASSWORD:?Defina MONGO_APP_PASSWORD no .env}@mongo:27017/orderdb?authSource=orderdb
+
+services:
+  rabbitmq:
+    <<: *hardening
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-orders}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Defina RABBITMQ_PASSWORD no .env}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mongo:
+    <<: *hardening
+    image: mongo:8.0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Defina MONGO_ROOT_PASSWORD no .env}
+      # Usuario com acesso apenas ao banco orderdb (mongo-init/01-create-app-user.js)
+      MONGO_APP_DB: orderdb
+      MONGO_APP_USER: ${MONGO_APP_USER:-orders_app}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?Defina MONGO_APP_PASSWORD no .env}
+    volumes:
+      - mongo_data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  order-server:
+    <<: *java-service
+    build:
+      context: ../order-server
+      additional_contexts:
+        grpc-commons: ../grpc-commons
+    environment:
+      <<: *rabbit-env
+      MONGODB_URI: *mongo-uri
+      GRPC_REFLECTION_ENABLED: "false"
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+
+  order-worker:
+    <<: *java-service
+    build:
+      context: ../order-worker
+    environment:
+      <<: *rabbit-env
+      MONGODB_URI: *mongo-uri
+      WORKER_PROCESSING_DELAY_MS: ${WORKER_PROCESSING_DELAY_MS:-1200}
+      WORKER_FAILURE_RATE: ${WORKER_FAILURE_RATE:-0.0}
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+
+  order-client:
+    <<: *java-service
+    build:
+      context: ../order-client
+      additional_contexts:
+        grpc-commons: ../grpc-commons
+    environment:
+      <<: *rabbit-env
+      ORDER_SERVER_GRPC_ADDRESS: order-server:9090
+      ORDER_WORKER_URL: http://order-worker:8082
+      SIMULATION_ENABLED: ${SIMULATION_ENABLED:-true}
+      SIMULATION_AUTO_RESET_SECONDS: ${SIMULATION_AUTO_RESET_SECONDS:-180}
+      WORKER_PROCESSING_DELAY_MS: ${WORKER_PROCESSING_DELAY_MS:-1200}
+    networks:
+      - backend
+      - edge
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      order-server: { condition: service_healthy }
+
+  frontend:
+    <<: *hardening
+    build:
+      context: ../order-frontend
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    ports:
+      # Unica porta publicada. 127.0.0.1 = acessivel so pela propria maquina.
+      - "${PUBLIC_BIND:-127.0.0.1}:${PUBLIC_PORT:-3000}:8080"
+    networks:
+      - edge
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    depends_on:
+      order-client: { condition: service_healthy }
+
+networks:
+  # Sem acesso a internet e sem portas publicadas
+  backend:
+    internal: true
+  # Front-end <-> gateway
+  edge: {}
+
+volumes:
+  rabbitmq_data:
+  mongo_data:

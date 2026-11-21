@@ -1,0 +1,28 @@
+# APENAS PARA DESENVOLVIMENTO LOCAL. Nunca use na VPS.
+# Publica as portas internas somente em 127.0.0.1 para depuracao:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+services:
+  rabbitmq:
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672" # painel do RabbitMQ
+  mongo:
+    ports:
+      - "127.0.0.1:27017:27017"
+  order-server:
+    environment:
+      GRPC_REFLECTION_ENABLED: "true" # permite grpcurl
+    ports:
+      - "127.0.0.1:9090:9090"
+  order-worker:
+    ports:
+      - "127.0.0.1:8082:8082"
+  order-client:
+    ports:
+      - "127.0.0.1:8080:8080"
+
+networks:
+  # Redes internas nao permitem publicar portas
+  backend:
+    internal: false
